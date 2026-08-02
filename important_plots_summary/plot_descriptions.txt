@@ -1,0 +1,82 @@
+Important Plot Descriptions
+===========================
+
+Metric used in the main plots
+-----------------------------
+The main performance metric is the relative improvement of MC-aware optimization
+over the standard no-coupling optimization when both are evaluated with mutual
+coupling:
+
+Improvement (%) = 100 * (Gain_MC-aware_with_MC - Gain_standard_with_MC)
+                  / Gain_standard_with_MC
+
+This metric is preferred over raw average channel gain because it directly shows
+the benefit of accounting for mutual coupling under the real coupled channel.
+
+
+1. 01_mcaware_relative_improvement_vs_spacing.png
+-------------------------------------------------
+This is the most important plot for explaining the spacing trend.
+
+The x-axis shows the RIS inter-element spacing: lambda/4, lambda/2, and lambda.
+The y-axis shows the percentage improvement from MC-aware optimization. The
+three panels correspond to N_RIS = 16, 64, and 256.
+
+Key observation:
+MC-aware optimization gives the largest gain at lambda/4 spacing, especially
+for N_RIS = 256. For the largest RIS, the improvements are approximately:
+
+Greedy:      10.09%
+Gumbel:      12.31%
+Transformer: 13.95%
+
+As spacing increases to lambda/2 and lambda, the improvement drops sharply and
+approaches zero. This supports the expected physical behavior that mutual
+coupling is strongest when elements are closely spaced and becomes weak for
+larger spacing.
+
+
+2. 02_mcaware_relative_improvement_vs_nris.png
+----------------------------------------------
+This plot is best for showing how RIS size affects the usefulness of MC-aware
+optimization.
+
+The x-axis shows the number of RIS elements: 16, 64, and 256. The y-axis shows
+the MC-aware relative improvement in percent. The three panels correspond to
+lambda/4, lambda/2, and lambda spacing.
+
+Key observation:
+At lambda/4 spacing, the improvement increases strongly with N_RIS. The gain is
+almost negligible for N_RIS = 16, modest for N_RIS = 64, and large for
+N_RIS = 256. This indicates that mutual coupling becomes more important in
+large, dense RIS arrays.
+
+At lambda/2 and lambda spacing, increasing N_RIS does not produce the same
+large improvement. This shows that spacing is the dominant factor controlling
+the coupling effect.
+
+
+3. 03_raw_channel_gain_vs_nris_lambda_4.png
+------------------------------------------
+This plot shows the raw average channel gain versus the number of RIS elements
+at lambda/4 spacing, where mutual coupling is strongest.
+
+It includes the standard no-coupling reference, the standard design evaluated
+with mutual coupling, and the MC-aware design evaluated with mutual coupling
+for all three approaches.
+
+Key observation:
+This plot is useful as a supporting figure, but the raw channel gain values are
+harder to compare directly across RIS sizes because different N_RIS settings may
+have different absolute channel scaling and normalization effects. Therefore,
+the relative-improvement plots should be used as the main paper figures, while
+this raw-gain plot can be used as supplementary evidence.
+
+
+Overall conclusion
+------------------
+The results show that MC-aware optimization is most beneficial for large,
+densely packed RIS deployments. The strongest gains occur at lambda/4 spacing
+and N_RIS = 256. As the spacing increases to lambda/2 and lambda, the advantage
+of MC-aware optimization becomes small, indicating that the coupled channel
+approaches the no-coupling behavior for widely spaced RIS elements.

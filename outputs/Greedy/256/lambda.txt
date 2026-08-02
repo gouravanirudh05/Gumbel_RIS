@@ -1,0 +1,33 @@
+
+gourav-anirudh@gourav-anirudh-Inspiron-14-5430:~/Desktop/RE$ venv/bin/python greedy_baseline_fixed_64.py
+Using device: cpu
+Loaded Data/RIS_Channels_256_lambda.mat (scipy format)
+G shape: (64, 256, 2000)
+H shape: (256, 64, 2000)
+D shape: (64, 64, 2000)
+Nr = 64, Nris = 256, N_total = 2000
+Loading S matrix: Data/S_matrix_N256_lambda_1.npy
+
+Computing dataset-wide normalization factor...
+Global normalization factor: 1.248019e-05
+
+Using 400 test samples
+Running greedy on 50 test samples...
+100%|████████████████████████████████████████████████████████████████████████████████████████████████| 50/50 [05:36<00:00,  6.73s/it]
+
+============================================================
+GREEDY BASELINE RESULTS (50 test samples, FIXED)
+============================================================
+Optimized with            |  Eval: Standard |   Eval: With MC
+------------------------------------------------------------
+Standard (no MC)          |       8810.3236 |       8811.7168
+MC-aware                  |       8810.2441 |       8811.9784
+============================================================
+
+MC-aware gain improvement (MC-aware vs Std, eval WITH MC — the real-world gain):
+  8811.9784 - 8811.7168 = 0.2615 Channel Gain (0.00%)
+
+Timing:
+  Standard greedy: 0.9644 sec/sample
+  MC-aware greedy: 5.7530 sec/sample
+gourav-anirudh@gourav-anirudh-Inspiron-14-5430:~/Desktop/RE$ 
