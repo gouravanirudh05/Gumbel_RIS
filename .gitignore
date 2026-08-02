@@ -13,7 +13,6 @@ context/*
 *.pdf 
 *.txt 
 *.mat 
-*.png 
 
 # Distribution / packaging
 .Python
