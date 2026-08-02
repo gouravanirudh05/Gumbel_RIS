@@ -1,16 +1,12 @@
 # -*- coding: utf-8 -*-
-"""GumbelRIS MC — CHANNEL GAIN metric (FIXED to match greedy baseline)
+"""GumbelRIS MC — FIXED VERSION
 
-Metric: Channel gain = ||C_norm||²_F  where  C_norm = C / GLOBAL_NORM_FACTOR
-GLOBAL_NORM_FACTOR = sqrt(mean of mean(|C_identity|^2) over dataset)
-This is identical to the normalization used in greedy_baseline_fixed_64.py.
-
-Features:
-1. Channel gain (linear) as training loss and evaluation metric
-2. Dataset-wide normalization (preserves MC power gain)
-3. Single-inversion MC formula: Phi_eff = Phi @ inv(I - S @ Phi)
-4. Trace-based scaling law metrics from Z matrix
-5. Gradient clipping + cosine LR annealing
+Fixes applied:
+1. Dataset-wide normalization (preserves MC power gain)
+2. Single-inversion MC formula: Phi_eff = Phi @ inv(I - S @ Phi)
+3. Deeper CNN with 256-dim bottleneck (was 32)
+4. Gradient clipping + lower LR for MC path
+5. More epochs (30) + adjusted annealing
 """
 
 
@@ -35,7 +31,7 @@ print("Using device:", device)
 #   'RIS_Channels.mat'                 — 256-element (scipy format)
 #   'RIS_Channels_256.mat'             — 256-element (scipy format)
 #   'SimRIS_1024_100realizations.mat'   — 1024-element (HDF5 v7.3)
-DATA_PATH = 'Data/RIS_Channels_256_lambda_4.mat'
+DATA_PATH = 'RIS_Channels_1024.mat'
 USE_MUTUAL_COUPLING = True
 
 # ==========================================================
@@ -108,67 +104,38 @@ if D_all is None:
     D_all = np.zeros((Nr, Nt, N_samples), dtype=np.complex128)
 
 # ==========================================================
-# LOAD S MATRIX AND Z MATRIX
+# LOAD S MATRIX (MUTUAL COUPLING)
 # ==========================================================
 if USE_MUTUAL_COUPLING:
-    S_MATRIX_PATH = f'Data/S_matrix_N{N_RIS}_lambda_4.npy'
-    # Z_MATRIX_PATH = f'Z_matrix_N{N_RIS}_lambda_1.npy'
-
+    S_MATRIX_PATH = f'S_matrix_N{N_RIS}_lambda_4.npy'
     S_np = np.load(S_MATRIX_PATH)
     print(f"S matrix path: {S_MATRIX_PATH}, shape: {S_np.shape}")
     S_torch = torch.tensor(S_np, dtype=torch.complex64, device=device)
-
-    Z_np = None
-    # print(f"Z matrix path: {Z_MATRIX_PATH}, shape: {Z_np.shape}")
 else:
     S_torch = None
-    Z_np = None
     print("Mutual coupling disabled")
 
 # ==========================================================
-# TRACE-BASED SCALING LAW METRICS (Nerini et al. Fig 4a-4d)
-# ==========================================================
-print(f"\n{'='*60}")
-print("SCALING LAW METRICS (from Z matrix)")
-print(f"{'='*60}")
-
-if Z_np is not None:
-    Re_Z_inv = np.linalg.inv(Z_np.real)
-    trace_1 = np.real(np.trace(Re_Z_inv))              # Tr(Re{Z_II}^{-1})
-    trace_2 = np.real(np.trace(Re_Z_inv @ Re_Z_inv))    # Tr(Re{Z_II}^{-2})
-    print(f"  Tr(Re{{Z_II}}^{{-1}})  = {trace_1:.4f}   (no-MC equivalent: N = {N_RIS})")
-    print(f"  Tr(Re{{Z_II}}^{{-2}})  = {trace_2:.4f}   (no-MC equivalent: N = {N_RIS})")
-    print(f"  MC amplification (Tr1/N) = {trace_1/N_RIS:.4f}x")
-    print(f"  MC amplification (Tr2/N) = {trace_2/N_RIS:.4f}x")
-
-    S_eigs = np.linalg.eigvals(S_np)
-    S_eig_mags = np.abs(S_eigs)
-    print(f"\n  S-matrix spectral radius = {np.max(S_eig_mags):.6f}")
-    print(f"  S-matrix mean |eigenvalue| = {np.mean(S_eig_mags):.6f}")
-else:
-    trace_1 = float(N_RIS)
-    trace_2 = float(N_RIS)
-    print(f"  No MC — Tr(Re{{Z_II}}^{{-1}}) = Tr(Re{{Z_II}}^{{-2}}) = N = {N_RIS}")
-
-# ==========================================================
-# COMPUTE DATASET-WIDE NORMALIZATION (same as greedy baseline)
+# FIX 1: COMPUTE DATASET-WIDE NORMALIZATION FACTOR
 # ==========================================================
 # Instead of normalizing each sample independently (which erases
 # MC power gain), we compute ONE normalization factor from the
 # dataset and use it consistently.
 print("\nComputing dataset-wide normalization factor...")
-norm_samples = min(500, N_samples)
+norm_samples = min(500, G_all.shape[2])
 C_powers = []
 for idx in range(norm_samples):
     G_s = G_all[:, :, idx]
     H_s = H_all[:, :, idx]
     D_s = D_all[:, :, idx]
-    C_s = G_s @ H_s + D_s
+    # Use identity phase (no optimization) as the baseline
+    C_s = G_s @ H_s + D_s  # No Phi needed since Phi=I
     C_powers.append(np.mean(np.abs(C_s)**2))
 
 GLOBAL_NORM_FACTOR = np.sqrt(np.mean(C_powers))
-GLOBAL_NORM_TENSOR = torch.tensor(GLOBAL_NORM_FACTOR, dtype=torch.float32, device=device)
 print(f"Global normalization factor: {GLOBAL_NORM_FACTOR:.6e}")
+
+GLOBAL_NORM_TENSOR = torch.tensor(GLOBAL_NORM_FACTOR, dtype=torch.float32, device=device)
 
 # ==========================================================
 # DATASET
@@ -200,22 +167,13 @@ class RISDataset(Dataset):
         H_scaled = H / scale
         D_scaled = D / scale
 
-        # Determine universal spatial dimensions to fit any combination of Nr, Nt, N_RIS
-        max_rows = max(Nr, Nt)
-        max_cols = max(N_RIS, Nt)
-        
-        G_pad = np.zeros((max_rows, max_cols), dtype=np.complex128)
-        G_pad[:Nr, :N_RIS] = G_scaled
-        
-        H_pad = np.zeros((max_rows, max_cols), dtype=np.complex128)
-        H_pad[:Nt, :N_RIS] = H_scaled.T
-        
-        D_pad = np.zeros((max_rows, max_cols), dtype=np.complex128)
-        D_pad[:Nr, :Nt] = D_scaled
+        H_pad = H_scaled.T                                    # (Nt, N_RIS)
+        D_pad = np.zeros((Nr, N_RIS), dtype=np.complex128)    # (Nr, N_RIS)
+        D_pad[:, :Nt] = D_scaled
 
         tensor = np.stack([
-            np.real(G_pad),
-            np.imag(G_pad),
+            np.real(G_scaled),
+            np.imag(G_scaled),
             np.real(H_pad),
             np.imag(H_pad),
             np.real(D_pad),
@@ -247,7 +205,7 @@ test_loader  = DataLoader(test_set, batch_size=8)
 print("Split done.")
 
 # ==========================================================
-# MODEL ARCHITECTURE
+# FIX 3: IMPROVED MODEL ARCHITECTURE
 # ==========================================================
 class GumbelRIS(nn.Module):
     def __init__(self, n_ris, tau=1.0):
@@ -278,28 +236,34 @@ def construct_phase(y):
     return torch.exp(1j * phi)
 
 # ==========================================================
-# CHANNEL GAIN FUNCTION (matches greedy baseline exactly)
+# FIX 1+2: CORRECTED CAPACITY FUNCTION
 # ==========================================================
+# Uses global normalization (not per-sample) to preserve MC power gain.
+I_Nr = torch.eye(Nr, dtype=torch.complex64, device=device)
 
-def compute_channel_gain(C):
+def compute_capacity(C, snr_db=20.0):
     """
-    Compute normalized channel gain (linear, differentiable).
-    Same formula as greedy_baseline_fixed_64.py:
-      C_norm = C / GLOBAL_NORM_FACTOR
-      gain   = ||C_norm||_F^2
+    Capacity with GLOBAL normalization (preserves MC power differences).
     """
+    rho = 10 ** (snr_db / 10)
+
+    # FIX 1: Use global normalization factor instead of per-sample
     C_norm = C / GLOBAL_NORM_TENSOR
-    gain = torch.norm(C_norm, p='fro')**2
-    return gain.real
+
+    M = I_Nr + rho * (C_norm @ C_norm.conj().T)
+    sign, logdet = torch.linalg.slogdet(M)
+    cap = logdet / torch.log(torch.tensor(2.0, device=C.device))
+    return cap.real
 
 
-def compute_channel_gain_batch(G, H, D, phi, S=None):
+def compute_capacity_batch(G, H, D, phi, snr_db=20.0, S=None):
     """
-    Compute mean channel gain (linear) over a batch.
-    Uses single-inversion MC formula for stable gradients.
+    FIX 2: Uses single-inversion MC formula for stable gradients.
+    Old: Phi_eff = inv(inv(Phi) - S)           -- TWO inversions
+    New: Phi_eff = Phi @ inv(I - S @ Phi)      -- ONE inversion
     """
     batch = G.shape[0]
-    gains = []
+    capacities = []
 
     I_N = torch.eye(N_RIS, dtype=torch.complex64, device=G.device)
 
@@ -307,17 +271,18 @@ def compute_channel_gain_batch(G, H, D, phi, S=None):
         Phi = torch.diag(phi[b])
 
         if S is not None:
-            # Single-inversion formula: Phi_eff = Phi @ (I - S @ Phi)^{-1}
+            # FIX 2: Single-inversion formula
+            # Phi_eff = Phi @ (I - S @ Phi)^{-1}
             SPhi = S @ Phi
             Phi_eff = Phi @ torch.linalg.inv(I_N - SPhi)
             C = G[b] @ Phi_eff @ H[b] + D[b]
         else:
             C = G[b] @ Phi @ H[b] + D[b]
 
-        gain = compute_channel_gain(C)
-        gains.append(gain)
+        cap = compute_capacity(C, snr_db=snr_db)
+        capacities.append(cap)
 
-    return torch.mean(torch.stack(gains))
+    return torch.mean(torch.stack(capacities))
 
 # ==========================================================
 # TRAINING HELPER
@@ -329,23 +294,22 @@ print("Mean |G|:", np.mean(np.abs(G_all)))
 print("Mean |H|:", np.mean(np.abs(H_all)))
 print("Mean |D|:", np.mean(np.abs(D_all)))
 
-# Hyperparameters
+# FIX 5: Better hyperparameters
 epochs = 30
 tau0 = 0.5
 tau_min = 0.1
 anneal_rate = 0.93
 
 def train_model(S_train, label, lr=5e-4):
-    """Train a GumbelRIS model maximizing channel gain."""
+    """Train a GumbelRIS model with or without MC."""
     print(f"\n{'='*50}")
     print(f"TRAINING MODEL: {label}")
-    print(f"Metric: Channel Gain (linear)")
     print(f"{'='*50}")
 
     model = GumbelRIS(n_ris=N_RIS, tau=1.0).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
 
-    # Learning rate scheduler
+    # FIX 5: Learning rate scheduler
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=lr/10)
 
     losses = []
@@ -364,13 +328,12 @@ def train_model(S_train, label, lr=5e-4):
             y, _ = model(x)
             phi = construct_phase(y)
 
-            # Loss = negative channel gain (maximize gain → minimize negative gain)
-            loss = -compute_channel_gain_batch(G, H, D, phi, S=S_train)
+            loss = -compute_capacity_batch(G, H, D, phi, snr_db=20.0, S=S_train)
 
             optimizer.zero_grad()
             loss.backward()
 
-            # Gradient clipping to prevent exploding gradients from MC inversions
+            # FIX 4: Gradient clipping to prevent exploding gradients from MC inversions
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
 
             optimizer.step()
@@ -381,16 +344,15 @@ def train_model(S_train, label, lr=5e-4):
         avg_loss = total_loss / len(train_loader)
         losses.append(avg_loss)
         current_lr = scheduler.get_last_lr()[0]
-        avg_gain = -avg_loss
-        print(f"Epoch {epoch+1} | Avg Gain: {avg_gain:.4f} | Tau: {model.tau:.4f} | LR: {current_lr:.6f}")
+        print(f"Epoch {epoch+1} | Loss: {avg_loss:.4f} | Tau: {model.tau:.4f} | LR: {current_lr:.6f}")
 
     return model, losses
 
 
 def evaluate_model(model, S_eval):
-    """Evaluate a trained model, returning mean channel gain."""
+    """Evaluate a trained model with or without MC."""
     model.eval()
-    gains = []
+    capacities = []
 
     with torch.no_grad():
         for x, G, H, D in test_loader:
@@ -402,10 +364,10 @@ def evaluate_model(model, S_eval):
             y, _ = model(x, hard=True)
             phi = construct_phase(y)
 
-            gain = compute_channel_gain_batch(G, H, D, phi, S=S_eval)
-            gains.append(gain.item())
+            cap = compute_capacity_batch(G, H, D, phi, S=S_eval)
+            capacities.append(cap.item())
 
-    return np.mean(gains), np.std(gains)
+    return np.mean(capacities), np.std(capacities)
 
 
 # ==========================================================
@@ -422,43 +384,20 @@ model_mc, losses_mc = train_model(S_train=S_torch, label="MC-aware", lr=3e-4)
 # EVALUATE BOTH MODELS ON BOTH CHANNELS
 # ==========================================================
 
-gain_std_std, std_std_std = evaluate_model(model_std, S_eval=None)
-gain_std_mc, std_std_mc   = evaluate_model(model_std, S_eval=S_torch)
-gain_mc_std, std_mc_std   = evaluate_model(model_mc,  S_eval=None)
-gain_mc_mc, std_mc_mc     = evaluate_model(model_mc,  S_eval=S_torch)
+cap_std_std, _ = evaluate_model(model_std, S_eval=None)
+cap_std_mc, _  = evaluate_model(model_std, S_eval=S_torch)
+cap_mc_std, _  = evaluate_model(model_mc,  S_eval=None)
+cap_mc_mc, _   = evaluate_model(model_mc,  S_eval=S_torch)
 
 print(f"\n{'='*60}")
-print(f"GUMBELRIS RESULTS ({test_size} test samples, FIXED)")
+print(f"CAPACITY COMPARISON (bps/Hz at SNR=20 dB)")
 print(f"{'='*60}")
 print(f"{'Trained on':<25} | {'Eval: Standard':>15} | {'Eval: With MC':>15}")
 print(f"{'-'*60}")
-print(f"{'Standard (no MC)':<25} | {gain_std_std:>15.4f} | {gain_std_mc:>15.4f}")
-print(f"{'MC-aware':<25} | {gain_mc_std:>15.4f} | {gain_mc_mc:>15.4f}")
+print(f"{'Standard (no MC)':<25} | {cap_std_std:>15.4f} | {cap_std_mc:>15.4f}")
+print(f"{'MC-aware':<25} | {cap_mc_std:>15.4f} | {cap_mc_mc:>15.4f}")
 print(f"{'='*60}")
-
-# The key comparison: MC-aware vs Standard, both evaluated WITH MC
-mc_gain_abs = gain_mc_mc - gain_std_mc
-mc_gain_pct = 100 * mc_gain_abs / gain_std_mc
-print(f"\nMC-aware gain improvement (MC-aware vs Std, eval WITH MC — the real-world gain):")
-print(f"  {gain_mc_mc:.4f} - {gain_std_mc:.4f} = {mc_gain_abs:.4f} Channel Gain ({mc_gain_pct:.2f}%)")
-
-# MC effect on channel itself (with MC vs without MC, same model)
-mc_effect_std = gain_std_mc - gain_std_std
-mc_effect_aw  = gain_mc_mc - gain_mc_std
-print(f"\n--- MC EFFECT ON CHANNEL (with MC vs without MC) ---")
-print(f"  Std model:  {mc_effect_std:+.4f}  (MC {'boosts' if mc_effect_std > 0 else 'degrades'} channel)")
-print(f"  MC model:   {mc_effect_aw:+.4f}  (MC {'boosts' if mc_effect_aw > 0 else 'degrades'} channel)")
-
-# ==========================================================
-# SCALING LAW SUMMARY
-# ==========================================================
-print(f"\n{'='*65}")
-print(f"SCALING LAW SUMMARY")
-print(f"{'='*65}")
-print(f"  N_RIS = {N_RIS}")
-print(f"  Tr(Re{{Z_II}}^{{-1}}) = {trace_1:.2f}  vs  N = {N_RIS}")
-print(f"  Tr(Re{{Z_II}}^{{-2}}) = {trace_2:.2f}  vs  N = {N_RIS}")
-print(f"  → MC amplifies beamforming gain by {trace_1/N_RIS:.2f}x")
-print(f"  → MC amplifies coherent power by {trace_2/N_RIS:.2f}x")
-if Z_np is not None:
-    print(f"  → Spectral radius ρ(S) = {np.max(S_eig_mags):.4f}")
+mc_gain_abs = cap_mc_mc - cap_std_mc
+mc_gain_pct = 100 * mc_gain_abs / cap_std_mc
+print(f"\nMC gain (MC-trained vs Std-trained, eval WITH MC):")
+print(f"  {cap_mc_mc:.4f} - {cap_std_mc:.4f} = {mc_gain_abs:.4f} bps/Hz ({mc_gain_pct:.2f}%)")
